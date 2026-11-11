@@ -18,15 +18,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install reflex helper utilities like bun/node
-COPY rxconfig.py ./
 # Install Node.js (Reflex needs this to build the frontend)
 RUN apt-get update && apt-get install -y nodejs npm
-RUN reflex init --template blank
 
-# Copy local context to `/app` inside container (see .dockerignore)
+# Copy the entire project (including rxconfig.py and all app files)
 COPY . .
-
 ARG PORT API_URL PROXY_CONTENT SOCKS5
 # Download other npm dependencies and compile frontend
 RUN REFLEX_API_URL=${API_URL:-http://localhost:$PORT} reflex export --loglevel debug --frontend-only --no-zip && mv .web/build/client/* /srv/ && rm -rf .web
