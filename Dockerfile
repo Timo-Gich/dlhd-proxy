@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install reflex helper utilities like bun/node
 COPY rxconfig.py ./
-RUN reflex init
+RUN reflex init --template blank
 
 # Copy local context to `/app` inside container (see .dockerignore)
 COPY . .
