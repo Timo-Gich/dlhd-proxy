@@ -36,7 +36,7 @@ FROM --platform=$TARGETPLATFORM python:3.11-slim
 
 # Install Caddy and redis server inside image
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    caddy redis-server && rm -rf /var/lib/apt/lists/*
+    caddy redis-server ca-certificates && rm -rf /var/lib/apt/lists/*
 
 ARG PORT API_URL
 ENV PATH="/app/.venv/bin:$PATH" PORT=$PORT REFLEX_API_URL=${API_URL:-http://localhost:$PORT} REDIS_URL=redis://localhost PYTHONUNBUFFERED=1 PROXY_CONTENT=${PROXY_CONTENT:-TRUE} SOCKS5=${SOCKS5:-""}
