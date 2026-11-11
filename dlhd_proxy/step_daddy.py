@@ -123,56 +123,82 @@ class StepDaddy:
         key = "CHANNEL_KEY"
         url = f"{self._base_url}/stream/stream-{channel_id}.php"
         response = await self._get(url, headers=self._headers())
-        matches = re.compile("iframe src=\"(.*)\" width").findall(response.text)
-        if matches:
-            source_url = matches[0]
-            source_response = await self._get(source_url, headers=self._headers(url))
-        else:
+        iframe_matches = re.findall(r'iframe\s+src=["\']([^"\']+)["\']', response.text)
+        if not iframe_matches:
             raise ValueError("Failed to find source URL for channel")
 
-        channel_key = re.compile(rf"const\s+{re.escape(key)}\s*=\s*\"(.*?)\";").findall(source_response.text)[-1]
+        source_url = iframe_matches[0]
+        source_response = await self._get(source_url, headers=self._headers(url))
 
-        data = decode_bundle(source_response.text)
-        auth_ts = data.get("b_ts", "")
-        auth_sig = data.get("b_sig", "")
-        auth_rnd = data.get("b_rnd", "")
-        auth_url = data.get("b_host", "")
-        auth_request_url = f"{auth_url}auth.php?channel_id={channel_key}&ts={auth_ts}&rnd={auth_rnd}&sig={auth_sig}"
-        auth_response = await self._get(
-            auth_request_url, headers=self._headers(source_url)
-        )
-        if auth_response.status_code != 200:
-            raise ValueError("Failed to get auth response")
-        key_url = urlparse(source_url)
-        key_url = f"{key_url.scheme}://{key_url.netloc}/server_lookup.php?channel_id={channel_key}"
-        key_response = await self._get(key_url, headers=self._headers(source_url))
-        server_key = key_response.json().get("server_key")
-        if not server_key:
-            raise ValueError("No server key found in response")
-        if server_key == "top1/cdn":
-            server_url = f"https://top1.newkso.ru/top1/cdn/{channel_key}/mono.m3u8"
+        key_pattern = rf"(?:const|let|var|window\.)\s*{re.escape(key)}\s*=\s*['\"]([^'\"]+)['\"]"
+        matches = re.findall(key_pattern, source_response.text)
+        fallback_playlist_url = None
+        if matches:
+            channel_key = matches[-1]
         else:
-            server_url = f"https://{server_key}new.newkso.ru/{server_key}/{channel_key}/mono.m3u8"
-        m3u8 = await self._get(
-            server_url, headers=self._headers(quote(str(source_url)))
-        )
+            fallback_matches = re.findall(
+                r"source\s*:\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"]",
+                source_response.text,
+                re.IGNORECASE,
+            )
+            if not fallback_matches:
+                print("DEBUG: Could not find channel key or playlist URL. JavaScript preview:")
+                print(source_response.text[:500])
+                raise ValueError(
+                    "Failed to find channel key or direct playlist URL in source page"
+                )
+            fallback_playlist_url = fallback_matches[0]
+            channel_key = None
+
+        if fallback_playlist_url:
+            m3u8 = await self._get(
+                fallback_playlist_url, headers=self._headers(source_url)
+            )
+            key_host = urlparse(fallback_playlist_url).netloc
+        else:
+            data = decode_bundle(source_response.text)
+            auth_ts = data.get("b_ts", "")
+            auth_sig = data.get("b_sig", "")
+            auth_rnd = data.get("b_rnd", "")
+            auth_url = data.get("b_host", "")
+            auth_request_url = f"{auth_url}auth.php?channel_id={channel_key}&ts={auth_ts}&rnd={auth_rnd}&sig={auth_sig}"
+            auth_response = await self._get(
+                auth_request_url, headers=self._headers(source_url)
+            )
+            if auth_response.status_code != 200:
+                raise ValueError("Failed to get auth response")
+            key_url = urlparse(source_url)
+            key_url = f"{key_url.scheme}://{key_url.netloc}/server_lookup.php?channel_id={channel_key}"
+            key_response = await self._get(key_url, headers=self._headers(source_url))
+            server_key = key_response.json().get("server_key")
+            if not server_key:
+                raise ValueError("No server key found in response")
+            if server_key == "top1/cdn":
+                server_url = f"https://top1.newkso.ru/top1/cdn/{channel_key}/mono.m3u8"
+            else:
+                server_url = f"https://{server_key}new.newkso.ru/{server_key}/{channel_key}/mono.m3u8"
+            m3u8 = await self._get(
+                server_url, headers=self._headers(quote(str(source_url)))
+            )
+            key_host = urlparse(source_url).netloc
+
         rewritten_lines: list[str] = []
         for line in m3u8.text.splitlines():
             if line.startswith("#EXT-X-KEY:"):
-                original_url = re.search(r'URI="(.*?)"', line).group(1)
-                line = line.replace(
-                    original_url,
-                    f"{config.api_url}/key/{encrypt(original_url)}/{encrypt(urlparse(source_url).netloc)}",
-                )
+                key_match = re.search(r'URI="(.*?)"', line)
+                if key_match:
+                    original_url = key_match.group(1)
+                    line = line.replace(
+                        original_url,
+                        f"{config.api_url}/key/{encrypt(original_url)}/{encrypt(key_host)}",
+                    )
                 rewritten_lines.append(line)
                 continue
 
             if line.startswith("http"):
                 parsed_url = urlparse(line)
                 path = (parsed_url.path or "").lower()
-                if _is_hls_path(path):
-                    rewritten_lines.append(f"{config.api_url}/content/{encrypt(line)}")
-                elif config.proxy_content:
+                if _is_hls_path(path) or config.proxy_content:
                     rewritten_lines.append(f"{config.api_url}/content/{encrypt(line)}")
                 else:
                     rewritten_lines.append(line)
