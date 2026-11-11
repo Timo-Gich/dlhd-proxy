@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 import reflex as rx
 from curl_cffi.requests import AsyncSession
+from curl_cffi.const import CurlOpt
 
 try:
     from bs4 import BeautifulSoup
@@ -50,7 +51,13 @@ class Channel(rx.Base):
 class StepDaddy:
     def __init__(self):
         socks5 = config.socks5
-        session_options = {"impersonate": "chrome110", "http_version": "v1"}
+        # CURLOPT_IPRESOLVE=V4 ensures curl resolves/connects over IPv4; binding
+        # to 0.0.0.0 is not a reliable way to select the remote address family.
+        session_options = {
+            "impersonate": "chrome110",
+            "http_version": "v1",
+            "curl_options": {CurlOpt.IPRESOLVE: 1},
+        }
         if socks5 != "":
             session_options["proxy"] = "socks5://" + socks5
         self._session = AsyncSession(**session_options)
@@ -61,19 +68,21 @@ class StepDaddy:
             self._meta = json.loads(meta_data)
         except Exception:
             self._meta = {}
-        self._logged_domains = {"thedaddy.li", "daddylivestream.com", "dlhd.dad"}
+        self._logged_domains = {
+            "thedaddy.li", "daddylivestream.com", "dlhd.dad",
+            "dembed.st", "dembed.cc", "dembed.xyz",
+        }
 
     def _headers(self, referer: str = None, origin: str = None):
         if referer is None:
-            referer = self._base_url
+            referer = f"{self._base_url}/"
         if origin is None:
             origin = self._base_url
-        headers = {
+        return {
             "Referer": referer,
             "Origin": origin,
-            "user-agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         }
-        return headers
 
     async def load_channels(self):
         channels: list[Channel] = []
@@ -123,32 +132,53 @@ class StepDaddy:
         key = "CHANNEL_KEY"
         url = f"{self._base_url}/stream/stream-{channel_id}.php"
         response = await self._get(url, headers=self._headers())
-
         iframe_matches = re.findall(r'iframe\s+src=["\']([^"\']+)["\']', response.text)
         if not iframe_matches:
             raise ValueError("Failed to find source URL for channel")
 
         source_url = iframe_matches[0]
-        source_response = await self._get(source_url, headers=self._headers(url))
+        # Try the advertised embed host first, followed by its known alternatives.
+        embed_candidates = [source_url]
+        for domain in ("dembed.cc", "dembed.xyz"):
+            if "dembed.st" in source_url:
+                embed_candidates.append(source_url.replace("dembed.st", domain))
+        source_response = None
+        last_error = None
+        embed_headers = self._headers(f"{self._base_url}/", self._base_url)
+        for candidate in embed_candidates:
+            try:
+                candidate_response = await self._get(candidate, headers=embed_headers)
+                if candidate_response.status_code == 200:
+                    source_url = candidate
+                    source_response = candidate_response
+                    break
+                last_error = ValueError(
+                    f"Embed request returned HTTP {candidate_response.status_code}"
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Embed request to %s failed: %s", candidate, exc)
+        if source_response is None:
+            raise ValueError("Unable to fetch the stream embed page") from last_error
 
         key_pattern = rf"(?:const|let|var|window\.)\s*{re.escape(key)}\s*=\s*['\"]([^'\"]+)['\"]"
         matches = re.findall(key_pattern, source_response.text)
-
         if not matches:
-            matches = re.findall(
+            playlist_matches = re.findall(
                 r"source\s*:\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"]",
                 source_response.text,
                 re.IGNORECASE,
             )
-
-        if not matches:
-            print("DEBUG: Could not find channel key or playlist URL. JavaScript preview:")
-            print(source_response.text[:500])
-            raise ValueError(
-                "Failed to find channel key or direct playlist URL in source page"
-            )
-
-        if "CHANNEL_KEY" in source_response.text and re.search(rf"(?:const|let|var|window\.)\s*{re.escape(key)}\s*=", source_response.text):
+            if not playlist_matches:
+                logger.error(
+                    "Unable to find channel key or playlist in embed response; preview: %r",
+                    source_response.text[:500],
+                )
+                raise ValueError("Failed to find channel key or playlist URL in embed page")
+            playlist_url = playlist_matches[0]
+            m3u8 = await self._get(playlist_url, headers=self._headers(source_url))
+            key_host = urlparse(playlist_url).netloc
+        else:
             channel_key = matches[-1]
             data = decode_bundle(source_response.text)
             auth_ts = data.get("b_ts", "")
@@ -175,12 +205,6 @@ class StepDaddy:
                 server_url, headers=self._headers(quote(str(source_url)))
             )
             key_host = urlparse(source_url).netloc
-        else:
-            playlist_url = matches[0]
-            m3u8 = await self._get(
-                playlist_url, headers=self._headers(source_url)
-            )
-            key_host = urlparse(playlist_url).netloc
 
         rewritten_lines: list[str] = []
         for line in m3u8.text.splitlines():
@@ -215,7 +239,7 @@ class StepDaddy:
             url, headers=self._headers(f"{host}/", host), timeout=60
         )
         if response.status_code != 200:
-            raise Exception(f"Failed to get key")
+            raise Exception("Failed to get key")
         return response.content
 
     @staticmethod
@@ -235,12 +259,8 @@ class StepDaddy:
         response = await self._get(json_url, headers=self._headers())
         if response.status_code < 400:
             return response.json()
-
         if response.status_code not in {401, 403, 404}:
-            raise ValueError(
-                f"Failed to fetch schedule: HTTP {response.status_code}"
-            )
-
+            raise ValueError(f"Failed to fetch schedule: HTTP {response.status_code}")
         for path in ("/schedule", "/"):
             try:
                 html_response = await self._get(
@@ -250,70 +270,51 @@ class StepDaddy:
                 logger.debug("Schedule fallback request to %s failed: %s", path, exc)
                 continue
             if html_response.status_code >= 400:
-                logger.debug(
-                    "Schedule fallback %s returned HTTP %s",
-                    path,
-                    html_response.status_code,
-                )
+                logger.debug("Schedule fallback %s returned HTTP %s", path, html_response.status_code)
                 continue
             try:
                 schedule = self._parse_schedule_html(html_response.text)
             except ValueError as exc:
-                logger.debug(
-                    "Unable to parse schedule HTML from %s: %s", path, exc
-                )
+                logger.debug("Unable to parse schedule HTML from %s: %s", path, exc)
                 continue
             if schedule:
                 return schedule
-
         raise ValueError("Failed to fetch schedule: no usable response")
 
     @staticmethod
     def _parse_schedule_html(payload: str) -> dict[str, dict[str, list[dict]]]:
         if BeautifulSoup is None:
             raise ValueError("BeautifulSoup is required to parse schedule HTML")
-
         soup = BeautifulSoup(payload, "html.parser")
         container = soup.select_one("div.schedule")
         if not container:
             raise ValueError("Schedule container not found")
-
         schedule: dict[str, dict[str, list[dict]]] = {}
-
         for day in container.select("div.schedule__day"):
             title = day.select_one("div.schedule__dayTitle")
             day_name = title.get_text(strip=True) if title else ""
             if not day_name:
                 continue
-
             categories: dict[str, list[dict]] = {}
-
             for category in day.select("div.schedule__category"):
                 header = category.select_one(".schedule__catHeader .card__meta")
                 category_name = header.get_text(strip=True) if header else ""
                 if not category_name:
                     continue
-
                 events: list[dict] = []
-
                 for event in category.select("div.schedule__event"):
                     event_header = event.select_one(".schedule__eventHeader")
                     if not event_header:
                         continue
-
                     time_node = event_header.select_one(".schedule__time")
                     time_value = ""
                     if time_node:
                         time_value = time_node.get("data-time", "").strip() or time_node.get_text(strip=True)
-
                     title_node = event_header.select_one(".schedule__eventTitle")
-                    event_title = ""
-                    if title_node:
-                        event_title = title_node.get_text(strip=True)
+                    event_title = title_node.get_text(strip=True) if title_node else ""
                     event_title = event_title or event_header.get("data-title", "").strip()
                     if not event_title:
                         continue
-
                     channels: list[dict[str, str]] = []
                     channel_container = event.select_one(".schedule__channels")
                     if channel_container:
@@ -332,54 +333,30 @@ class StepDaddy:
                                     if match:
                                         channel_id = match.group(1)
                             name = (link.get("title") or link.get_text()).strip()
-                            if not channel_id or not name:
-                                continue
-                            channels.append(
-                                {"channel_id": str(channel_id), "channel_name": name}
-                            )
-
+                            if channel_id and name:
+                                channels.append({"channel_id": str(channel_id), "channel_name": name})
                     if not channels:
                         continue
-
                     event_data: dict[str, object] = {
-                        "time": time_value,
-                        "event": event_title,
-                        "channels": channels,
+                        "time": time_value, "event": event_title, "channels": channels,
                     }
-
-                    alt_container = event.select_one(
-                        ".schedule__channels--alternate, .schedule__channelsAlt"
-                    )
+                    alt_container = event.select_one(".schedule__channels--alternate, .schedule__channelsAlt")
                     if alt_container:
                         alt_channels: list[dict[str, str]] = []
                         for link in alt_container.find_all("a"):
-                            href = link.get("href", "")
-                            match = re.search(r"(\d+)", href)
-                            if not match:
-                                continue
+                            match = re.search(r"(\d+)", link.get("href", ""))
                             name = (link.get("title") or link.get_text()).strip()
-                            if not name:
-                                continue
-                            alt_channels.append(
-                                {
-                                    "channel_id": match.group(1),
-                                    "channel_name": name,
-                                }
-                            )
+                            if match and name:
+                                alt_channels.append({"channel_id": match.group(1), "channel_name": name})
                         if alt_channels:
                             event_data["channels2"] = alt_channels
-
                     events.append(event_data)
-
                 if events:
                     categories[category_name] = events
-
             if categories:
                 schedule[day_name] = categories
-
         if not schedule:
             raise ValueError("No schedule data located")
-
         return schedule
 
     async def aclose(self) -> None:
@@ -398,13 +375,9 @@ class StepDaddy:
             raise
         if self._should_log_url(url):
             if response.status_code >= 400:
-                logger.warning(
-                    "Request to %s returned HTTP %s", url, response.status_code
-                )
+                logger.warning("Request to %s returned HTTP %s", url, response.status_code)
             else:
-                logger.info(
-                    "Request to %s succeeded with HTTP %s", url, response.status_code
-                )
+                logger.info("Request to %s succeeded with HTTP %s", url, response.status_code)
         return response
 
     @staticmethod
@@ -413,7 +386,6 @@ class StepDaddy:
         counts: dict[str, int] = {}
         for channel in channel_list:
             counts[channel.name] = counts.get(channel.name, 0) + 1
-
         seen: dict[str, int] = {}
         for channel in channel_list:
             if counts[channel.name] > 1:
