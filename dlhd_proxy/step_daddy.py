@@ -123,6 +123,7 @@ class StepDaddy:
         key = "CHANNEL_KEY"
         url = f"{self._base_url}/stream/stream-{channel_id}.php"
         response = await self._get(url, headers=self._headers())
+
         iframe_matches = re.findall(r'iframe\s+src=["\']([^"\']+)["\']', response.text)
         if not iframe_matches:
             raise ValueError("Failed to find source URL for channel")
@@ -132,30 +133,23 @@ class StepDaddy:
 
         key_pattern = rf"(?:const|let|var|window\.)\s*{re.escape(key)}\s*=\s*['\"]([^'\"]+)['\"]"
         matches = re.findall(key_pattern, source_response.text)
-        fallback_playlist_url = None
-        if matches:
-            channel_key = matches[-1]
-        else:
-            fallback_matches = re.findall(
+
+        if not matches:
+            matches = re.findall(
                 r"source\s*:\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"]",
                 source_response.text,
                 re.IGNORECASE,
             )
-            if not fallback_matches:
-                print("DEBUG: Could not find channel key or playlist URL. JavaScript preview:")
-                print(source_response.text[:500])
-                raise ValueError(
-                    "Failed to find channel key or direct playlist URL in source page"
-                )
-            fallback_playlist_url = fallback_matches[0]
-            channel_key = None
 
-        if fallback_playlist_url:
-            m3u8 = await self._get(
-                fallback_playlist_url, headers=self._headers(source_url)
+        if not matches:
+            print("DEBUG: Could not find channel key or playlist URL. JavaScript preview:")
+            print(source_response.text[:500])
+            raise ValueError(
+                "Failed to find channel key or direct playlist URL in source page"
             )
-            key_host = urlparse(fallback_playlist_url).netloc
-        else:
+
+        if "CHANNEL_KEY" in source_response.text and re.search(rf"(?:const|let|var|window\.)\s*{re.escape(key)}\s*=", source_response.text):
+            channel_key = matches[-1]
             data = decode_bundle(source_response.text)
             auth_ts = data.get("b_ts", "")
             auth_sig = data.get("b_sig", "")
@@ -181,6 +175,12 @@ class StepDaddy:
                 server_url, headers=self._headers(quote(str(source_url)))
             )
             key_host = urlparse(source_url).netloc
+        else:
+            playlist_url = matches[0]
+            m3u8 = await self._get(
+                playlist_url, headers=self._headers(source_url)
+            )
+            key_host = urlparse(playlist_url).netloc
 
         rewritten_lines: list[str] = []
         for line in m3u8.text.splitlines():
