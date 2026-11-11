@@ -8,7 +8,7 @@ from typing import Iterable, List
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 import reflex as rx
-from curl_cffi import AsyncSession
+from curl_cffi.requests import AsyncSession
 
 try:
     from bs4 import BeautifulSoup
@@ -50,28 +50,29 @@ class Channel(rx.Base):
 class StepDaddy:
     def __init__(self):
         socks5 = config.socks5
+        session_options = {"impersonate": "chrome110", "http_version": "v1"}
         if socks5 != "":
-            self._session = AsyncSession(proxy="socks5://" + socks5)
-        else:
-            self._session = AsyncSession()
-        self._base_url = "https://daddylivestream.com"
+            session_options["proxy"] = "socks5://" + socks5
+        self._session = AsyncSession(**session_options)
+        self._base_url = "https://thedaddy.li"
         self.channels: list[Channel] = []
         try:
             meta_data = resources.files(__package__).joinpath("meta.json").read_text()
             self._meta = json.loads(meta_data)
         except Exception:
             self._meta = {}
-        self._logged_domains = {"daddylivestream.com", "dlhd.dad"}
+        self._logged_domains = {"thedaddy.li", "daddylivestream.com", "dlhd.dad"}
 
     def _headers(self, referer: str = None, origin: str = None):
         if referer is None:
             referer = self._base_url
+        if origin is None:
+            origin = self._base_url
         headers = {
             "Referer": referer,
+            "Origin": origin,
             "user-agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0",
         }
-        if origin:
-            headers["Origin"] = origin
         return headers
 
     async def load_channels(self):
@@ -107,7 +108,10 @@ class StepDaddy:
                         logo=logo,
                     )
                 )
-            logger.info("Loaded %d channels from daddylivestream.com", len(channels))
+            if not channels:
+                print("DEBUG: Empty channel list. HTML preview:")
+                print(response.text[:500])
+            logger.info("Loaded %d channels from %s", len(channels), self._base_url)
         finally:
             self._enumerate_duplicate_names(channels)
             self.channels = sorted(
@@ -389,3 +393,4 @@ class StepDaddy:
             if counts[channel.name] > 1:
                 seen[channel.name] = seen.get(channel.name, 0) + 1
                 channel.name = f"{channel.name} ({seen[channel.name]})"
+
