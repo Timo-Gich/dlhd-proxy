@@ -71,6 +71,8 @@ class StepDaddy:
         self._logged_domains = {
             "thedaddy.li", "daddylivestream.com", "dlhd.dad",
             "dembed.st", "dembed.cc", "dembed.xyz",
+            "allupplay.xyz", "forcedtoplay.xyz", "livehdplay.ru",
+            "weblivehdplay.ru",
         }
 
     def _headers(self, referer: str = None, origin: str = None):
@@ -137,15 +139,26 @@ class StepDaddy:
             raise ValueError("Failed to find source URL for channel")
 
         source_url = iframe_matches[0]
-        # Try the advertised embed host first, followed by its known alternatives.
+        # Try the embed URL supplied by the channel page first, then the current
+        # known host/path combinations in case that URL is stale.
         embed_candidates = [source_url]
-        for domain in ("dembed.cc", "dembed.xyz"):
-            if "dembed.st" in source_url:
-                embed_candidates.append(source_url.replace("dembed.st", domain))
+        embed_domains = (
+            "allupplay.xyz",
+            "forcedtoplay.xyz",
+            "livehdplay.ru",
+            "weblivehdplay.ru",
+        )
+        embed_paths = ("/premiumtv/daddyhd.php", "/premiumtv/daddy.php")
+        for domain in embed_domains:
+            for path in embed_paths:
+                embed_candidates.append(
+                    f"https://{domain}{path}?id={channel_id}"
+                )
+
         source_response = None
         last_error = None
         embed_headers = self._headers(f"{self._base_url}/", self._base_url)
-        for candidate in embed_candidates:
+        for candidate in dict.fromkeys(embed_candidates):
             try:
                 candidate_response = await self._get(candidate, headers=embed_headers)
                 if candidate_response.status_code == 200:
@@ -154,6 +167,11 @@ class StepDaddy:
                     break
                 last_error = ValueError(
                     f"Embed request returned HTTP {candidate_response.status_code}"
+                )
+                logger.warning(
+                    "Embed request to %s returned HTTP %s",
+                    candidate,
+                    candidate_response.status_code,
                 )
             except Exception as exc:
                 last_error = exc
