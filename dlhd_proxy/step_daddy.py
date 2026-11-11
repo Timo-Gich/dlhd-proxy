@@ -361,7 +361,7 @@ class StepDaddy:
 
     async def _get(self, url: str, **kwargs):
         try:
-            response = await self._session.get(url, **kwargs)
+            response = await self._session.get(url, verify=False, **kwargs)
         except Exception:
             if self._should_log_url(url):
                 logger.exception("Request to %s failed", url)
