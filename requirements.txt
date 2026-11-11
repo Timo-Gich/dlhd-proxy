@@ -5,3 +5,4 @@ python-dateutil==2.9.0
 fastapi==0.116.1
 pytest==8.3.3
 beautifulsoup4==4.12.3
+sqlmodel==0.0.22
