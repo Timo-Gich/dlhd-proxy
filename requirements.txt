@@ -1,8 +1,8 @@
-reflex>=0.6.0
+reflex==0.8.7
 curl-cffi==0.11.4
 httpx[http2]==0.28.1
 python-dateutil==2.9.0
 fastapi==0.116.1
 pytest==8.3.3
 beautifulsoup4==4.12.3
-sqlmodel==0.0.22
+sqlmodel==0.0.24
