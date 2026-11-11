@@ -25,8 +25,7 @@ RUN apt-get update && apt-get install -y nodejs npm
 COPY . .
 ARG PORT API_URL PROXY_CONTENT SOCKS5
 # Download other npm dependencies and compile frontend
-RUN REFLEX_API_URL=${API_URL:-http://localhost:$PORT} reflex export --loglevel debug --frontend-only --no-zip && mv .web/_static/* /srv/ && rm -rf .web
-
+RUN REFLEX_API_URL=${API_URL:-http://localhost:$PORT} reflex export --loglevel debug --frontend-only --no-zip && (mv .web/build/client/* /srv/ 2>/dev/null || mv .web/_static/* /srv/) && rm -rf .web
 
 # Final image with only necessary files
 FROM --platform=$TARGETPLATFORM python:3.11-slim
