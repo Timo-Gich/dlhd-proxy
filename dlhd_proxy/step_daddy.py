@@ -5,7 +5,7 @@ import re
 from importlib import resources
 from pathlib import Path
 from typing import Iterable, List
-from urllib.parse import parse_qs, quote, urlparse, urlsplit
+from urllib.parse import parse_qs, quote, urljoin, urlparse, urlsplit
 
 import reflex as rx
 from curl_cffi.requests import AsyncSession
@@ -70,7 +70,7 @@ class StepDaddy:
             self._meta = {}
         self._logged_domains = {
             "thedaddy.li", "daddylivestream.com", "dlhd.dad",
-            "dembed.st", "dembed.cc", "dembed.xyz",
+            "dembed.cc", "dembed.xyz",
             "allupplay.xyz", "forcedtoplay.xyz", "livehdplay.ru",
             "weblivehdplay.ru",
         }
@@ -178,6 +178,31 @@ class StepDaddy:
                 logger.warning("Embed request to %s failed: %s", candidate, exc)
         if source_response is None:
             raise ValueError("Unable to fetch the stream embed page") from last_error
+
+        # curl_cffi does not execute JavaScript. Follow a simple location.href
+        # redirect explicitly, reusing this session (and its cookies).
+        js_redirect = re.search(
+            r"window\s*\.\s*location\s*\.\s*href\s*=\s*['\"]([^'\"]+)['\"]",
+            source_response.text,
+        )
+        if js_redirect:
+            redirect_url = urljoin(str(source_response.url or source_url), js_redirect.group(1))
+            try:
+                redirected_response = await self._get(
+                    redirect_url,
+                    headers=self._headers(f"{self._base_url}/", self._base_url),
+                )
+                if redirected_response.status_code < 400:
+                    source_response = redirected_response
+                    source_url = redirect_url
+                else:
+                    logger.warning(
+                        "JavaScript redirect to %s returned HTTP %s",
+                        redirect_url,
+                        redirected_response.status_code,
+                    )
+            except Exception:
+                logger.exception("Failed to follow embed JavaScript redirect to %s", redirect_url)
 
         key_pattern = rf"(?:const|let|var|window\.)\s*{re.escape(key)}\s*=\s*['\"]([^'\"]+)['\"]"
         matches = re.findall(key_pattern, source_response.text)
